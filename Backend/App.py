@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, render_template
 from flask_cors import CORS
 import pandas as pd
 import json
@@ -10,10 +10,25 @@ from openpyxl import Workbook
 from openpyxl.styles import PatternFill, Font
 from datetime import datetime
 
-app = Flask(__name__)
-CORS(app, resources={r"/api/*": {"origins": "*"}})
+app = Flask(__name__, template_folder='templates')
+CORS(app)
 
 PASSWORD = "Vishal@1234mumbai"
+
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+@app.route('/api/health', methods=['GET'])
+def health():
+    return jsonify({'status': 'ok', 'version': '3.0.0'})
+
+@app.route('/api/auth', methods=['POST'])
+def auth():
+    data = request.get_json()
+    if data.get('password') == PASSWORD:
+        return jsonify({'ok': True})
+    return jsonify({'ok': False}), 401
 
 def read_file(file_storage, sheet_name=None):
     name = file_storage.filename.lower()
@@ -148,17 +163,6 @@ def make_excel_b64(df, sheet_name, highlight_cols=None):
             ws.cell(row=ri, column=ci, value=val)
     wb.save(buf)
     return base64.b64encode(buf.getvalue()).decode()
-
-@app.route('/api/health', methods=['GET'])
-def health():
-    return jsonify({'status': 'ok', 'version': '2.0.0'})
-
-@app.route('/api/auth', methods=['POST'])
-def auth():
-    data = request.get_json()
-    if data.get('password') == PASSWORD:
-        return jsonify({'ok': True})
-    return jsonify({'ok': False}), 401
 
 @app.route('/api/process', methods=['POST'])
 def process():
