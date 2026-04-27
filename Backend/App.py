@@ -1,7 +1,5 @@
-from flask import Flask, request, jsonify, send_file
-from flask_cors import CORS
+from flask import Flask, request, jsonify, send_file, make_response
 import pandas as pd
-import numpy as np
 import json
 import re
 import io
@@ -11,23 +9,34 @@ from openpyxl.styles import PatternFill, Font
 from datetime import datetime
 
 app = Flask(__name__)
-CORS(app)
-
-@app.after_request
-def after_request(response):
-    response.headers.add('Access-Control-Allow-Origin', '*')
-    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
-    response.headers.add('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
-    return response
 
 PASSWORD = "Vishal@1234mumbai"
 
-@app.route('/api/auth', methods=['POST'])
+def add_cors(response):
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+    return response
+
+@app.route('/api/health', methods=['GET', 'OPTIONS'])
+def health():
+    if request.method == 'OPTIONS':
+        resp = make_response('', 200)
+        return add_cors(resp)
+    resp = make_response(jsonify({'status': 'ok', 'version': '1.0.0'}))
+    return add_cors(resp)
+
+@app.route('/api/auth', methods=['POST', 'OPTIONS'])
 def auth():
+    if request.method == 'OPTIONS':
+        resp = make_response('', 200)
+        return add_cors(resp)
     data = request.get_json()
     if data.get('password') == PASSWORD:
-        return jsonify({'ok': True})
-    return jsonify({'ok': False}), 401
+        resp = make_response(jsonify({'ok': True}))
+    else:
+        resp = make_response(jsonify({'ok': False}), 401)
+    return add_cors(resp)
 
 def read_file(file_storage, sheet_name=None):
     name = file_storage.filename.lower()
@@ -157,7 +166,8 @@ def process_margin(df, margin_type='gross'):
 @app.route('/api/process', methods=['POST', 'OPTIONS'])
 def process():
     if request.method == 'OPTIONS':
-        return '', 200
+        resp = make_response('', 200)
+        return add_cors(resp)
     try:
         week_config = json.loads(request.form.get('weekConfig', '[]'))
         action = request.form.get('action', 'master')
@@ -321,8 +331,9 @@ def process():
             with pd.ExcelWriter(buf, engine='openpyxl') as writer:
                 master_df.to_excel(writer, index=False, sheet_name='Master Raw Data')
             buf.seek(0)
-            return send_file(buf, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                           as_attachment=True, download_name='Master_Raw_Data.xlsx')
+            resp = make_response(send_file(buf, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                           as_attachment=True, download_name='Master_Raw_Data.xlsx'))
+            return add_cors(resp)
         elif action == 'gross':
             buf = io.BytesIO()
             wb = Workbook()
@@ -341,8 +352,9 @@ def process():
                     ws.cell(row=ri, column=ci, value=val)
             wb.save(buf)
             buf.seek(0)
-            return send_file(buf, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                           as_attachment=True, download_name='Gross_Margin_Processed.xlsx')
+            resp = make_response(send_file(buf, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                           as_attachment=True, download_name='Gross_Margin_Processed.xlsx'))
+            return add_cors(resp)
         elif action == 'net':
             buf = io.BytesIO()
             wb = Workbook()
@@ -361,15 +373,13 @@ def process():
                     ws.cell(row=ri, column=ci, value=val)
             wb.save(buf)
             buf.seek(0)
-            return send_file(buf, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                           as_attachment=True, download_name='Net_Margin_Processed.xlsx')
+            resp = make_response(send_file(buf, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                           as_attachment=True, download_name='Net_Margin_Processed.xlsx'))
+            return add_cors(resp)
     except Exception as e:
         import traceback
-        return jsonify({'error': str(e), 'trace': traceback.format_exc()}), 500
-
-@app.route('/api/health', methods=['GET'])
-def health():
-    return jsonify({'status': 'ok', 'version': '1.0.0'})
+        resp = make_response(jsonify({'error': str(e), 'trace': traceback.format_exc()}), 500)
+        return add_cors(resp)
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
