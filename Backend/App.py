@@ -11,7 +11,7 @@ from openpyxl.styles import PatternFill, Font
 from datetime import datetime
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, origins=["https://anujsharma-dot.github.io","http://localhost:5000","http://127.0.0.1:5000"])
 
 PASSWORD = "Vishal@1234mumbai"
 
