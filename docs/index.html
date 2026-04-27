@@ -167,7 +167,7 @@ body{font-family:'Syne',sans-serif;background:var(--bg);color:var(--text);min-he
 </div>
 </div>
 <script>
-const API_URL='https://script.google.com/macros/s/AKfycbxoKwrhvdp57U2cA2FKZ59RaRIcU4rSy-_fFPRreVQKQ06q008Cz8QU0WNOsL2-XZdM/exec';
+const GAS_URL='https://script.google.com/macros/s/AKfycbxoKwrhvdp57U2cA2FKZ59RaRIcU4rSy-_fFPRreVQKQ06q008Cz8QU0WNOsL2-XZdM/exec';
 const PASSWORD='Vishal@1234mumbai';
 const FILE_DEFS=[
 {id:'clientMaster',num:'01',name:'Client Master',desc:'Spine — Client Code, Activation Date, Lead Source, UNIT, DIY/Non DIY'},
@@ -182,20 +182,11 @@ let uploadedFiles={};
 let weekConfig=null;
 let db=null;
 let processedFiles={};
-
-async function openDB(){
-return new Promise((res,rej)=>{
-const req=indexedDB.open('ClientAnalyticsDB',1);
-req.onupgradeneeded=e=>{const d=e.target.result;if(!d.objectStoreNames.contains('files'))d.createObjectStore('files');if(!d.objectStoreNames.contains('cfg'))d.createObjectStore('cfg');};
-req.onsuccess=e=>{db=e.target.result;res(db);};
-req.onerror=()=>rej(req.error);
-});
-}
+async function openDB(){return new Promise((res,rej)=>{const req=indexedDB.open('ClientAnalyticsDB',1);req.onupgradeneeded=e=>{const d=e.target.result;if(!d.objectStoreNames.contains('files'))d.createObjectStore('files');if(!d.objectStoreNames.contains('cfg'))d.createObjectStore('cfg');};req.onsuccess=e=>{db=e.target.result;res(db);};req.onerror=()=>rej(req.error);});}
 function dbSet(store,key,val){if(!db)return;db.transaction(store,'readwrite').objectStore(store).put(val,key);}
 function dbGet(store,key){return new Promise(res=>{if(!db)return res(null);const req=db.transaction(store,'readonly').objectStore(store).get(key);req.onsuccess=()=>res(req.result||null);req.onerror=()=>res(null);});}
 function dbGetAll(store){return new Promise(res=>{if(!db)return res({});const tx=db.transaction(store,'readonly');const s=tx.objectStore(store);const keysReq=s.getAllKeys();keysReq.onsuccess=()=>{const keys=keysReq.result;if(!keys.length)return res({});const out={};let left=keys.length;keys.forEach(k=>{const r=s.get(k);r.onsuccess=()=>{out[k]=r.result;if(!--left)res(out);};r.onerror=()=>{if(!--left)res(out);};});};keysReq.onerror=()=>res({});});}
 function dbClear(store){if(!db)return;db.transaction(store,'readwrite').objectStore(store).clear();}
-
 async function doLogin(){
 const pass=document.getElementById('loginPass').value;
 if(pass!==PASSWORD){const e=document.getElementById('loginError');e.style.display='block';setTimeout(()=>e.style.display='none',3000);return;}
@@ -208,91 +199,58 @@ FILE_DEFS.forEach(f=>{if(saved[f.id]){uploadedFiles[f.id]=saved[f.id];markUpload
 const wc=await dbGet('cfg','weekConfig');
 if(wc)weekConfig=JSON.parse(wc);
 updateGenBtn();
-if(n){
-const el=document.getElementById('savedNote');
-const savedDate=await dbGet('cfg','savedDate');
-const todayStr=new Date().toDateString();
-if(savedDate&&savedDate!==todayStr){el.style.display='block';el.style.background='rgba(255,209,102,0.08)';el.style.borderColor='rgba(255,209,102,0.3)';el.style.color='var(--yellow)';el.textContent=n+' file(s) from previous session. Please upload today\'s fresh files.';}
-else{el.style.display='block';el.textContent=n+' file(s) restored from last session';}
-}
+if(n){const el=document.getElementById('savedNote');const savedDate=await dbGet('cfg','savedDate');const todayStr=new Date().toDateString();if(savedDate&&savedDate!==todayStr){el.style.display='block';el.style.background='rgba(255,209,102,0.08)';el.style.borderColor='rgba(255,209,102,0.3)';el.style.color='var(--yellow)';el.textContent=n+' file(s) from previous session. Please upload today\'s fresh files.';}else{el.style.display='block';el.textContent=n+' file(s) restored from last session';}}
 const today=new Date();
 document.getElementById('todayDate').textContent=today.toLocaleDateString('en-IN',{weekday:'long',day:'numeric',month:'long',year:'numeric'});
 const lastProc=await dbGet('cfg','lastProcessed');
 if(lastProc)document.getElementById('lastProcessed').textContent=lastProc;
 }
-
 function doLogout(){document.getElementById('loginScreen').style.display='flex';document.getElementById('mainScreen').style.display='none';document.getElementById('loginPass').value='';uploadedFiles={};document.getElementById('progressWrap').classList.remove('active');document.getElementById('dlWrap').classList.remove('active');document.getElementById('savedNote').style.display='none';}
-
+function jsonp(url){
+return new Promise((res,rej)=>{
+const cb='cb_'+Date.now();
+window[cb]=data=>{delete window[cb];const s=document.getElementById('_jsonp');if(s)s.remove();res(data);};
+const s=document.createElement('script');
+s.id='_jsonp';
+s.src=url+'&callback='+cb;
+s.onerror=()=>rej(new Error('Request failed'));
+setTimeout(()=>{delete window[cb];rej(new Error('Timeout after 5 minutes'));},300000);
+document.head.appendChild(s);
+});
+}
 async function checkAPI(){
 const bar=document.getElementById('apiStatusBar');
 const text=document.getElementById('apiStatusText');
 const badge=document.getElementById('apiStatusBadge');
 try{
-const r=await fetch(API_URL,{signal:AbortSignal.timeout(10000)});
-const data=await r.json();
-if(r.ok&&data.status==='ok'){bar.className='api-status ok';text.textContent='Processing server online — ready';badge.innerHTML='<span class="status-dot green"></span>API Online';}
+const data=await jsonp(GAS_URL+'?ping=1');
+if(data.status==='ok'){bar.className='api-status ok';text.textContent='Processing server online — ready';badge.innerHTML='<span class="status-dot green"></span>API Online';}
 else throw new Error('not ok');
 }catch{bar.className='api-status err';text.innerHTML='Processing server offline. Please refresh.';badge.innerHTML='<span class="status-dot" style="background:var(--red)"></span>API Offline';}
 }
-
-function initCards(){
-const grid=document.getElementById('filesGrid');grid.innerHTML='';
-FILE_DEFS.forEach(f=>{const card=document.createElement('div');card.className='file-card';card.id='card_'+f.id;card.innerHTML='<div class="file-num">FILE '+f.num+'</div><div class="file-name">'+f.name+'</div><div class="file-desc">'+f.desc+'</div><label class="file-btn"><input type="file" accept=".xlsx,.csv" onchange="handleFile(\''+f.id+'\',this)">+ Upload file</label><div class="file-fname" id="fn_'+f.id+'"></div>';grid.appendChild(card);});
-}
+function initCards(){const grid=document.getElementById('filesGrid');grid.innerHTML='';FILE_DEFS.forEach(f=>{const card=document.createElement('div');card.className='file-card';card.id='card_'+f.id;card.innerHTML='<div class="file-num">FILE '+f.num+'</div><div class="file-name">'+f.name+'</div><div class="file-desc">'+f.desc+'</div><label class="file-btn"><input type="file" accept=".xlsx,.csv" onchange="handleFile(\''+f.id+'\',this)">+ Upload file</label><div class="file-fname" id="fn_'+f.id+'"></div>';grid.appendChild(card);});}
 function markUploaded(fileId,label){document.getElementById('card_'+fileId).classList.add('uploaded');document.getElementById('fn_'+fileId).textContent='Done '+label;}
 function handleFile(fileId,input){const file=input.files[0];if(!file)return;uploadedFiles[fileId]=file;dbSet('files',fileId,file);dbSet('cfg','savedDate',new Date().toDateString());markUploaded(fileId,file.name);document.getElementById('savedNote').style.display='none';updateGenBtn();}
 function updateGenBtn(){const ok=FILE_DEFS.every(f=>uploadedFiles[f.id]);document.getElementById('genBtn').disabled=!ok;document.getElementById('genHint').textContent=ok?'All files ready — click Generate!':Object.keys(uploadedFiles).length+' / 7 files uploaded';}
 function clearSaved(){if(!confirm('Clear all saved files from browser?'))return;dbClear('files');dbClear('cfg');uploadedFiles={};weekConfig=null;processedFiles={};document.getElementById('savedNote').style.display='none';initCards();updateGenBtn();}
 function startGenerate(){showWeekPopup();}
-function showWeekPopup(){
-const rows=document.getElementById('weekRows');rows.innerHTML='';
-const defaults=[[0,5],[6,13],[14,21],[22,28],[29,31]];
-for(let w=1;w<=5;w++){const saved=weekConfig?weekConfig.find(x=>x.week===w):null;const ds=defaults[w-1][0];const de=defaults[w-1][1];rows.innerHTML+='<div class="week-row"><div class="week-label">Week '+w+'</div><div class="week-input-wrap"><label>START DAY</label><input type="number" class="week-input" id="ws'+w+'" min="0" max="31" value="'+(saved?saved.start:'')+'" placeholder="'+ds+'"></div><div class="week-input-wrap"><label>END DAY</label><input type="number" class="week-input" id="we'+w+'" min="0" max="31" value="'+(saved?saved.end:'')+'" placeholder="'+de+'"></div></div>';}
-document.getElementById('weekOverlay').classList.add('open');
-}
+function showWeekPopup(){const rows=document.getElementById('weekRows');rows.innerHTML='';const defaults=[[0,5],[6,13],[14,21],[22,28],[29,31]];for(let w=1;w<=5;w++){const saved=weekConfig?weekConfig.find(x=>x.week===w):null;const ds=defaults[w-1][0];const de=defaults[w-1][1];rows.innerHTML+='<div class="week-row"><div class="week-label">Week '+w+'</div><div class="week-input-wrap"><label>START DAY</label><input type="number" class="week-input" id="ws'+w+'" min="0" max="31" value="'+(saved?saved.start:'')+'" placeholder="'+ds+'"></div><div class="week-input-wrap"><label>END DAY</label><input type="number" class="week-input" id="we'+w+'" min="0" max="31" value="'+(saved?saved.end:'')+'" placeholder="'+de+'"></div></div>';}document.getElementById('weekOverlay').classList.add('open');}
 function closeWeek(){document.getElementById('weekOverlay').classList.remove('open');}
-function confirmWeek(){
-weekConfig=[];
-for(let w=1;w<=5;w++){const s=document.getElementById('ws'+w).value;const e=document.getElementById('we'+w).value;if(s!==''&&e!=='')weekConfig.push({week:w,start:+s,end:+e});}
-if(!weekConfig.length){alert('Enter at least Week 1 dates.');return;}
-dbSet('cfg','weekConfig',JSON.stringify(weekConfig));closeWeek();runProcess();
-}
+function confirmWeek(){weekConfig=[];for(let w=1;w<=5;w++){const s=document.getElementById('ws'+w).value;const e=document.getElementById('we'+w).value;if(s!==''&&e!=='')weekConfig.push({week:w,start:+s,end:+e});}if(!weekConfig.length){alert('Enter at least Week 1 dates.');return;}dbSet('cfg','weekConfig',JSON.stringify(weekConfig));closeWeek();runProcess();}
 function log(msg,type){const el=document.getElementById('progressLog');const d=document.createElement('div');d.className='log-line '+(type||'');d.textContent='['+new Date().toLocaleTimeString()+'] '+msg;el.appendChild(d);el.scrollTop=el.scrollHeight;}
 function setProgress(pct,label){document.getElementById('progressBar').style.width=pct+'%';document.getElementById('progressLabel').textContent=label;}
-
-function fileToB64(file){
-return new Promise((res,rej)=>{
-const reader=new FileReader();
-reader.onload=e=>res(e.target.result.split(',')[1]);
-reader.onerror=rej;
-reader.readAsDataURL(file);
-});
-}
-
+function fileToB64(file){return new Promise((res,rej)=>{const reader=new FileReader();reader.onload=e=>res(e.target.result.split(',')[1]);reader.onerror=rej;reader.readAsDataURL(file);});}
 async function callGAS(action){
-log('Converting files to base64...','info');
-const params=new URLSearchParams();
-params.append('action',action);
-params.append('password',PASSWORD);
-params.append('weekConfig',JSON.stringify(weekConfig));
-for(const f of FILE_DEFS){
-const b64=await fileToB64(uploadedFiles[f.id]);
-params.append(f.id,b64);
-}
-log('Sending to Google Apps Script...','info');
-const r=await fetch(API_URL,{method:'POST',body:params,signal:AbortSignal.timeout(300000)});
-const data=await r.json();
+log('Preparing '+action+'...','info');
+const params={action:action,password:PASSWORD,weekConfig:JSON.stringify(weekConfig)};
+for(const f of FILE_DEFS){params[f.id]=await fileToB64(uploadedFiles[f.id]);}
+const url=GAS_URL+'?'+Object.entries(params).map(([k,v])=>encodeURIComponent(k)+'='+encodeURIComponent(v)).join('&');
+log('Sending to server...','info');
+const data=await jsonp(url);
 if(data.error)throw new Error(data.error);
 return data;
 }
-
-function b64toBlob(b64){
-const bin=atob(b64);
-const arr=new Uint8Array(bin.length);
-for(let i=0;i<bin.length;i++)arr[i]=bin.charCodeAt(i);
-return new Blob([arr],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
-}
-
+function b64toBlob(b64){const bin=atob(b64);const arr=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)arr[i]=bin.charCodeAt(i);return new Blob([arr],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});}
 async function runProcess(){
 document.getElementById('progressWrap').classList.add('active');
 document.getElementById('dlWrap').classList.remove('active');
@@ -301,29 +259,24 @@ processedFiles={};
 ['dlMaster','dlGross','dlNet'].forEach(id=>document.getElementById(id).disabled=true);
 try{
 setProgress(5,'Checking server...');
-const health=await fetch(API_URL,{signal:AbortSignal.timeout(10000)});
-const hdata=await health.json();
-if(!hdata.status)throw new Error('Server not responding');
+const health=await jsonp(GAS_URL+'?ping=1');
+if(!health.status)throw new Error('Server not responding');
 log('Server online','ok');
-
 setProgress(15,'Step 1/3: Building Master Raw Data...');
-log('Building Master Raw Data (may take 2-3 mins for large files)...','info');
+log('Building Master Raw Data (may take 2-3 mins)...','info');
 const masterData=await callGAS('master');
 processedFiles.master={b64:masterData.file,filename:masterData.filename};
 log('Master Raw Data ready','ok');
-
 setProgress(50,'Step 2/3: Processing Gross Margin...');
 log('Processing Gross Margin...','info');
 const grossData=await callGAS('gross');
 processedFiles.gross={b64:grossData.file,filename:grossData.filename};
 log('Gross Margin ready','ok');
-
 setProgress(80,'Step 3/3: Processing Net Margin...');
 log('Processing Net Margin...','info');
 const netData=await callGAS('net');
 processedFiles.net={b64:netData.file,filename:netData.filename};
 log('Net Margin ready','ok');
-
 setProgress(100,'All done! Downloads ready below.');
 log('Processing complete!','ok');
 const procTime=new Date().toLocaleString('en-IN',{day:'numeric',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'});
@@ -334,20 +287,7 @@ document.getElementById('dlDateLabel').textContent=new Date().toLocaleDateString
 document.getElementById('dlWrap').classList.add('active');
 }catch(err){log('ERROR: '+err.message,'err');setProgress(0,'Error — check log above');}
 }
-
-function download(type){
-const f=processedFiles[type];
-if(!f)return;
-const d=new Date();
-const ds=d.getDate().toString().padStart(2,'0')+'_'+(d.getMonth()+1).toString().padStart(2,'0')+'_'+d.getFullYear();
-const names={master:'Master_Raw_Data_'+ds+'.xlsx',gross:'Gross_Margin_Processed_'+ds+'.xlsx',net:'Net_Margin_Processed_'+ds+'.xlsx'};
-const blob=b64toBlob(f.b64);
-const a=document.createElement('a');
-a.href=URL.createObjectURL(blob);
-a.download=names[type];
-a.click();
-URL.revokeObjectURL(a.href);
-}
+function download(type){const f=processedFiles[type];if(!f)return;const d=new Date();const ds=d.getDate().toString().padStart(2,'0')+'_'+(d.getMonth()+1).toString().padStart(2,'0')+'_'+d.getFullYear();const names={master:'Master_Raw_Data_'+ds+'.xlsx',gross:'Gross_Margin_Processed_'+ds+'.xlsx',net:'Net_Margin_Processed_'+ds+'.xlsx'};const blob=b64toBlob(f.b64);const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=names[type];a.click();URL.revokeObjectURL(a.href);}
 </script>
 </body>
 </html>
