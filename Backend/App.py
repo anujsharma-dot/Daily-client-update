@@ -11,7 +11,14 @@ from openpyxl.styles import PatternFill, Font
 from datetime import datetime
 
 app = Flask(__name__)
-CORS(app, origins=["https://anujsharma-dot.github.io","http://localhost:5000","http://127.0.0.1:5000"])
+CORS(app)
+
+@app.after_request
+def after_request(response):
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
+    return response
 
 PASSWORD = "Vishal@1234mumbai"
 
@@ -147,8 +154,10 @@ def process_margin(df, margin_type='gross'):
                 margin_map[cc] = safe_float(row[t60_cap_col]) / 100_000
     return df, margin_map, new_cols
 
-@app.route('/api/process', methods=['POST'])
+@app.route('/api/process', methods=['POST', 'OPTIONS'])
 def process():
+    if request.method == 'OPTIONS':
+        return '', 200
     try:
         week_config = json.loads(request.form.get('weekConfig', '[]'))
         action = request.form.get('action', 'master')
@@ -245,19 +254,19 @@ def process():
             cc = str(row[cm_cc]).strip() if cm_cc else ''
             if not cc or cc == 'nan':
                 continue
-            act_date    = row[cm_act_date] if cm_act_date else ''
-            act_month   = row[cm_act_month] if cm_act_month else ''
+            act_date     = row[cm_act_date] if cm_act_date else ''
+            act_month    = row[cm_act_month] if cm_act_month else ''
             lead_src_raw = str(row[cm_lead_src_det]) if cm_lead_src_det else ''
-            lead_src    = str(row[cm_lead_src]) if cm_lead_src else ''
-            unit        = str(row[cm_unit]) if cm_unit else ''
-            diy         = str(row[cm_diy]) if cm_diy else ''
+            lead_src     = str(row[cm_lead_src]) if cm_lead_src else ''
+            unit         = str(row[cm_unit]) if cm_unit else ''
+            diy          = str(row[cm_diy]) if cm_diy else ''
             source_group = match_source_group(lead_src_raw, source_map)
-            week        = assign_week(act_date, week_config)
-            vol         = vol_map.get(cc, 0) / 100_000
-            first_trade = 1 if vol > 0 else 0
-            revenue     = rev_map.get(cc, 0) / 100_000
-            gm          = gm_map.get(cc, 0)
-            nm          = nm_map.get(cc, 0)
+            week         = assign_week(act_date, week_config)
+            vol          = vol_map.get(cc, 0) / 100_000
+            first_trade  = 1 if vol > 0 else 0
+            revenue      = rev_map.get(cc, 0) / 100_000
+            gm           = gm_map.get(cc, 0)
+            nm           = nm_map.get(cc, 0)
             iap  = iap_map.get(cc,  {'amount': 0, 'count': 0})
             tgs  = tgs_map.get(cc,  {'amount': 0, 'count': 0})
             ssp  = ssp_map.get(cc,  {'amount': 0, 'count': 0})
@@ -268,7 +277,7 @@ def process():
             pms  = pms_map.get(cc,  {'amount': 0, 'count': 0})
             ip_amt = mfs['amount'] + bnd['amount'] + pms['amount']
             ip_cnt = mfs['count']  + bnd['count']  + pms['count']
-            prod_counts   = [ssp['count'], tm['count'], tgs['count'], iap['count'], ip_cnt, r360['count']]
+            prod_counts    = [ssp['count'], tm['count'], tgs['count'], iap['count'], ip_cnt, r360['count']]
             total_products = sum(1 for c in prod_counts if c > 0)
             master_rows.append({
                 'Client Code': cc,
