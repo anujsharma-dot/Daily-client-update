@@ -1,50 +1,26 @@
-from flask import Flask, request, jsonify, send_file, make_response
+from flask import Flask, request, jsonify
+from flask_cors import CORS
 import pandas as pd
 import json
 import re
 import io
 import os
+import base64
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill, Font
 from datetime import datetime
 
 app = Flask(__name__)
+CORS(app, resources={r"/api/*": {"origins": "*"}})
 
 PASSWORD = "Vishal@1234mumbai"
-
-def add_cors(response):
-    response.headers['Access-Control-Allow-Origin'] = '*'
-    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
-    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
-    return response
-
-@app.route('/api/health', methods=['GET', 'OPTIONS'])
-def health():
-    if request.method == 'OPTIONS':
-        resp = make_response('', 200)
-        return add_cors(resp)
-    resp = make_response(jsonify({'status': 'ok', 'version': '1.0.0'}))
-    return add_cors(resp)
-
-@app.route('/api/auth', methods=['POST', 'OPTIONS'])
-def auth():
-    if request.method == 'OPTIONS':
-        resp = make_response('', 200)
-        return add_cors(resp)
-    data = request.get_json()
-    if data.get('password') == PASSWORD:
-        resp = make_response(jsonify({'ok': True}))
-    else:
-        resp = make_response(jsonify({'ok': False}), 401)
-    return add_cors(resp)
 
 def read_file(file_storage, sheet_name=None):
     name = file_storage.filename.lower()
     if name.endswith('.csv'):
         return pd.read_csv(file_storage, dtype=str).fillna('')
     else:
-        kwargs = {'dtype': str, 'sheet_name': sheet_name or 0}
-        return pd.read_excel(file_storage, **kwargs)
+        return pd.read_excel(file_storage, dtype=str, sheet_name=sheet_name or 0)
 
 def read_all_sheets(file_storage):
     return pd.read_excel(file_storage, sheet_name=None, dtype=str)
@@ -124,35 +100,26 @@ IP_PRODUCT_MAP = {
 def get_ip_product_type(row):
     pt_col = str(row.get('Product Type', row.get('Product 2', ''))).strip()
     if pt_col in ('MF - SIP', 'Bonds', 'PMS'):
-        mapping = {'MF - SIP': 'MF-SIP', 'Bonds': 'Bonds', 'PMS': 'PMS'}
-        return mapping[pt_col]
-    p = str(row.get('Product', '')).strip().lower()
-    return IP_PRODUCT_MAP.get(p, None)
+        return {'MF - SIP': 'MF-SIP', 'Bonds': 'Bonds', 'PMS': 'PMS'}[pt_col]
+    return IP_PRODUCT_MAP.get(str(row.get('Product', '')).strip().lower(), None)
 
 def process_margin(df, margin_type='gross'):
     t = margin_type
     days = ['05', '9', '15', '22', '30', '60', 'as_on']
     beyond_cash = 'Cash Margin Beyound 60' if t == 'gross' else 'Net_cash_Margin beyound 60'
     beyond_stock = 'Stock Margin Beyound 60' if t == 'gross' else 'Net_stock_Margin beyound 60'
-    new_cols = []
     for d in days:
-        cash_col = f'cash_{d}_days_{t}_margin'
-        stock_col = f'stock_{d}_days_{t}_margin'
         label = 'As_On' if d == 'as_on' else f'T+{d}'
-        w_col = f'Total {label} Weighted {t.title()} Margin'
-        c_col = f'Total {label} Capped {t.title()} Margin'
-        cash = df[cash_col].apply(safe_float) if cash_col in df.columns else pd.Series(0, index=df.index)
-        stock = df[stock_col].apply(safe_float) if stock_col in df.columns else pd.Series(0, index=df.index)
+        cash = df[f'cash_{d}_days_{t}_margin'].apply(safe_float) if f'cash_{d}_days_{t}_margin' in df.columns else pd.Series(0, index=df.index)
+        stock = df[f'stock_{d}_days_{t}_margin'].apply(safe_float) if f'stock_{d}_days_{t}_margin' in df.columns else pd.Series(0, index=df.index)
         w = cash + stock * 0.2
-        df[w_col] = w
-        df[c_col] = w.apply(lambda x: min(x, 1_000_000))
-        new_cols += [w_col, c_col]
+        df[f'Total {label} Weighted {t.title()} Margin'] = w
+        df[f'Total {label} Capped {t.title()} Margin'] = w.apply(lambda x: min(x, 1_000_000))
     cb = df[beyond_cash].apply(safe_float) if beyond_cash in df.columns else pd.Series(0, index=df.index)
     sb = df[beyond_stock].apply(safe_float) if beyond_stock in df.columns else pd.Series(0, index=df.index)
     wb_val = cb + sb * 0.2
     df[f'Total Beyond60 Weighted {t.title()} Margin'] = wb_val
     df[f'Total Beyond60 Capped {t.title()} Margin'] = wb_val.apply(lambda x: min(x, 1_000_000))
-    new_cols += [f'Total Beyond60 Weighted {t.title()} Margin', f'Total Beyond60 Capped {t.title()} Margin']
     cc_col = find_col(df, ['Client Code', 'clientcode', 'ClientCode'])
     t60_cap_col = f'Total T+60 Capped {t.title()} Margin'
     margin_map = {}
@@ -161,13 +128,40 @@ def process_margin(df, margin_type='gross'):
             cc = str(row[cc_col]).strip()
             if cc:
                 margin_map[cc] = safe_float(row[t60_cap_col]) / 100_000
-    return df, margin_map, new_cols
+    return df, margin_map
 
-@app.route('/api/process', methods=['POST', 'OPTIONS'])
+def make_excel_b64(df, sheet_name, highlight_cols=None):
+    buf = io.BytesIO()
+    wb = Workbook()
+    ws = wb.active
+    ws.title = sheet_name
+    headers = list(df.columns)
+    yellow = PatternFill('solid', fgColor='FFFF00')
+    bold = Font(bold=True)
+    for ci, h in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=ci, value=h)
+        if highlight_cols and any(k in h for k in highlight_cols):
+            cell.fill = yellow
+            cell.font = bold
+    for ri, row in enumerate(df.itertuples(index=False), 2):
+        for ci, val in enumerate(row, 1):
+            ws.cell(row=ri, column=ci, value=val)
+    wb.save(buf)
+    return base64.b64encode(buf.getvalue()).decode()
+
+@app.route('/api/health', methods=['GET'])
+def health():
+    return jsonify({'status': 'ok', 'version': '2.0.0'})
+
+@app.route('/api/auth', methods=['POST'])
+def auth():
+    data = request.get_json()
+    if data.get('password') == PASSWORD:
+        return jsonify({'ok': True})
+    return jsonify({'ok': False}), 401
+
+@app.route('/api/process', methods=['POST'])
 def process():
-    if request.method == 'OPTIONS':
-        resp = make_response('', 200)
-        return add_cors(resp)
     try:
         week_config = json.loads(request.form.get('weekConfig', '[]'))
         action = request.form.get('action', 'master')
@@ -178,13 +172,7 @@ def process():
         rev_df = read_file(files['revenue'])
         vol_df = read_file(files['volume'])
         sm_sheets = read_all_sheets(files['sourceMaster'])
-        sm_df = None
-        for sname, sdf in sm_sheets.items():
-            if any(c for c in sdf.columns if 'keyword' in c.lower() or 'source group' in c.lower()):
-                sm_df = sdf
-                break
-        if sm_df is None:
-            sm_df = list(sm_sheets.values())[0]
+        sm_df = next((sdf for sname, sdf in sm_sheets.items() if any('keyword' in c.lower() or 'source group' in c.lower() for c in sdf.columns)), list(sm_sheets.values())[0])
         tpp_sheets = read_all_sheets(files['tpp'])
         vol_cc = find_col(vol_df, ['Clientcode', 'ClientCode', 'Client Code'])
         vol_map = {}
@@ -197,189 +185,116 @@ def process():
         if rev_cc:
             for _, r in rev_df.iterrows():
                 cc = str(r[rev_cc]).strip()
-                net_rev = safe_float(r.get('Net Revenue', r.get('net revenue', 0)))
-                rev_map[cc] = rev_map.get(cc, 0) + net_rev
-        gm_processed, gm_map, gm_new_cols = process_margin(gm_df, 'gross')
-        nm_processed, nm_map, nm_new_cols = process_margin(nm_df, 'net')
+                rev_map[cc] = rev_map.get(cc, 0) + safe_float(r.get('Net Revenue', r.get('net revenue', 0)))
+        gm_processed, gm_map = process_margin(gm_df, 'gross')
+        nm_processed, nm_map = process_margin(nm_df, 'net')
 
-        def agg_sheet(sheet_df, cc_candidates, amt_col_candidates):
+        def agg_sheet(sheet_df, cc_candidates, amt_cols):
             cc_c = find_col(sheet_df, cc_candidates)
-            amt_c = find_col(sheet_df, amt_col_candidates)
+            amt_c = find_col(sheet_df, amt_cols)
             result = {}
-            if not cc_c:
-                return result
+            if not cc_c: return result
             for _, r in sheet_df.iterrows():
                 cc = str(r[cc_c]).strip()
-                if not cc or cc == 'nan':
-                    continue
+                if not cc or cc == 'nan': continue
                 amt = safe_float(r[amt_c]) if amt_c else 0
-                if cc not in result:
-                    result[cc] = {'amount': 0, 'count': 0}
+                if cc not in result: result[cc] = {'amount': 0, 'count': 0}
                 result[cc]['amount'] += amt
                 result[cc]['count'] += 1
             return result
 
-        def find_tpp_sheet(keywords):
+        def find_tpp(keywords):
             for sname in tpp_sheets:
                 if any(k.lower() in sname.lower() for k in keywords):
                     return tpp_sheets[sname]
             return list(tpp_sheets.values())[0]
 
-        iap_df  = find_tpp_sheet(['IAP', 'iap'])
-        tgs_df  = find_tpp_sheet(['TGS', 'tgs'])
-        ssp_df  = find_tpp_sheet(['SSP', 'ssp'])
-        tm_df   = find_tpp_sheet(['Teji', 'TM', 'tejimandi'])
-        r360_df = find_tpp_sheet(['R360', 'Research', 'research360'])
-        ip_df   = find_tpp_sheet(['IP', ' ip'])
-        iap_map  = agg_sheet(iap_df,  ['ClientCode', 'Client Code'], ['InvestmentAmount', 'Investment Amount'])
-        tgs_map  = agg_sheet(tgs_df,  ['ClientCode', 'Client Code'], ['TGS Amt', 'TGS Amount'])
-        ssp_map  = agg_sheet(ssp_df,  ['Clientcode', 'ClientCode', 'Client Code'], ['Amount'])
-        tm_map   = agg_sheet(tm_df,   ['clientCode', 'ClientCode', 'Client Code'], ['Invested_Amount', 'InvestmentAmount'])
-        r360_map = agg_sheet(r360_df, ['Mosl Client ID', 'ClientCode', 'Client Code'], ['amount', 'Amount'])
-        ip_cc = find_col(ip_df, ['Client Code', 'ClientCode'])
+        iap_map  = agg_sheet(find_tpp(['IAP']), ['ClientCode','Client Code'], ['InvestmentAmount','Investment Amount'])
+        tgs_map  = agg_sheet(find_tpp(['TGS']), ['ClientCode','Client Code'], ['TGS Amt','TGS Amount'])
+        ssp_map  = agg_sheet(find_tpp(['SSP']), ['Clientcode','ClientCode','Client Code'], ['Amount'])
+        tm_map   = agg_sheet(find_tpp(['Teji','TM']), ['clientCode','ClientCode','Client Code'], ['Invested_Amount','InvestmentAmount'])
+        r360_map = agg_sheet(find_tpp(['R360','Research']), ['Mosl Client ID','ClientCode','Client Code'], ['amount','Amount'])
+        ip_df = find_tpp(['IP'])
+        ip_cc = find_col(ip_df, ['Client Code','ClientCode'])
         mfsip_map, bonds_map, pms_map = {}, {}, {}
         if ip_cc:
             for _, r in ip_df.iterrows():
                 cc = str(r[ip_cc]).strip()
-                if not cc or cc == 'nan':
-                    continue
+                if not cc or cc == 'nan': continue
                 pt = get_ip_product_type(r)
                 amt = safe_float(r.get('Amount', 0))
                 target = {'MF-SIP': mfsip_map, 'Bonds': bonds_map, 'PMS': pms_map}.get(pt)
                 if target is not None:
-                    if cc not in target:
-                        target[cc] = {'amount': 0, 'count': 0}
+                    if cc not in target: target[cc] = {'amount': 0, 'count': 0}
                     target[cc]['amount'] += amt
                     target[cc]['count'] += 1
         source_map = build_source_map(sm_df)
-        cm_cc        = find_col(cm_df, ['Client Code', 'ClientCode', 'clientcode'])
-        cm_act_date  = find_col(cm_df, ['Account Activation Date', 'Activation Date', 'activation_date'])
-        cm_act_month = find_col(cm_df, ['Account Activation Month', 'Activation Month'])
-        cm_lead_src  = find_col(cm_df, ['Lead Source', 'lead_source'])
-        cm_lead_src_det = find_col(cm_df, ['Lead Source Details', 'lead_source_details'])
-        cm_unit      = find_col(cm_df, ['UNIT', 'Unit'])
-        cm_diy       = find_col(cm_df, ['DIY/Non DIY', 'Non DIY', 'IS DIY', 'UNIT DIT/NON DIY'])
+        cm_cc = find_col(cm_df, ['Client Code','ClientCode','clientcode'])
+        cm_act_date = find_col(cm_df, ['Account Activation Date','Activation Date'])
+        cm_act_month = find_col(cm_df, ['Account Activation Month','Activation Month'])
+        cm_lead_src = find_col(cm_df, ['Lead Source','lead_source'])
+        cm_lead_src_det = find_col(cm_df, ['Lead Source Details','lead_source_details'])
+        cm_unit = find_col(cm_df, ['UNIT','Unit'])
+        cm_diy = find_col(cm_df, ['DIY/Non DIY','Non DIY','IS DIY','UNIT DIT/NON DIY'])
         master_rows = []
         for _, row in cm_df.iterrows():
             cc = str(row[cm_cc]).strip() if cm_cc else ''
-            if not cc or cc == 'nan':
-                continue
-            act_date     = row[cm_act_date] if cm_act_date else ''
-            act_month    = row[cm_act_month] if cm_act_month else ''
+            if not cc or cc == 'nan': continue
+            act_date = row[cm_act_date] if cm_act_date else ''
+            act_month = row[cm_act_month] if cm_act_month else ''
             lead_src_raw = str(row[cm_lead_src_det]) if cm_lead_src_det else ''
-            lead_src     = str(row[cm_lead_src]) if cm_lead_src else ''
-            unit         = str(row[cm_unit]) if cm_unit else ''
-            diy          = str(row[cm_diy]) if cm_diy else ''
-            source_group = match_source_group(lead_src_raw, source_map)
-            week         = assign_week(act_date, week_config)
-            vol          = vol_map.get(cc, 0) / 100_000
-            first_trade  = 1 if vol > 0 else 0
-            revenue      = rev_map.get(cc, 0) / 100_000
-            gm           = gm_map.get(cc, 0)
-            nm           = nm_map.get(cc, 0)
-            iap  = iap_map.get(cc,  {'amount': 0, 'count': 0})
-            tgs  = tgs_map.get(cc,  {'amount': 0, 'count': 0})
-            ssp  = ssp_map.get(cc,  {'amount': 0, 'count': 0})
-            tm   = tm_map.get(cc,   {'amount': 0, 'count': 0})
-            r360 = r360_map.get(cc, {'amount': 0, 'count': 0})
-            mfs  = mfsip_map.get(cc, {'amount': 0, 'count': 0})
-            bnd  = bonds_map.get(cc, {'amount': 0, 'count': 0})
-            pms  = pms_map.get(cc,  {'amount': 0, 'count': 0})
+            lead_src = str(row[cm_lead_src]) if cm_lead_src else ''
+            vol = vol_map.get(cc, 0) / 100_000
+            gm = gm_map.get(cc, 0)
+            nm = nm_map.get(cc, 0)
+            iap = iap_map.get(cc, {'amount':0,'count':0})
+            tgs = tgs_map.get(cc, {'amount':0,'count':0})
+            ssp = ssp_map.get(cc, {'amount':0,'count':0})
+            tm = tm_map.get(cc, {'amount':0,'count':0})
+            r360 = r360_map.get(cc, {'amount':0,'count':0})
+            mfs = mfsip_map.get(cc, {'amount':0,'count':0})
+            bnd = bonds_map.get(cc, {'amount':0,'count':0})
+            pms = pms_map.get(cc, {'amount':0,'count':0})
             ip_amt = mfs['amount'] + bnd['amount'] + pms['amount']
-            ip_cnt = mfs['count']  + bnd['count']  + pms['count']
-            prod_counts    = [ssp['count'], tm['count'], tgs['count'], iap['count'], ip_cnt, r360['count']]
-            total_products = sum(1 for c in prod_counts if c > 0)
+            ip_cnt = mfs['count'] + bnd['count'] + pms['count']
+            total_products = sum(1 for c in [ssp['count'],tm['count'],tgs['count'],iap['count'],ip_cnt,r360['count']] if c > 0)
             master_rows.append({
                 'Client Code': cc,
                 'Account Activation Date': str(act_date),
                 'Account Activation Month': str(act_month),
-                'Lead Source': lead_src or source_group,
-                'UNIT': unit,
-                'DIY/Non DIY': diy,
-                'Week': week,
-                'SSP Amount': round(ssp['amount'], 2),
-                'SSP IDs': ssp['count'],
-                'TM Amount': round(tm['amount'], 2),
-                'TM IDs': tm['count'],
-                'TGS Amount': round(tgs['amount'], 2),
-                'TGS IDs': tgs['count'],
-                'IMP/IAP Amount': round(iap['amount'], 2),
-                'IMP/IAP IDs': iap['count'],
-                'IP Amount': round(ip_amt, 2),
-                'IP IDs': ip_cnt,
-                'MF SIP Amount': round(mfs['amount'], 2),
-                'MF SIP IDs': mfs['count'],
-                'Bonds Amount': round(bnd['amount'], 2),
-                'Bonds IDs': bnd['count'],
-                'PMS Amount': round(pms['amount'], 2),
-                'PMS IDs': pms['count'],
-                'R360 Amount': round(r360['amount'], 2),
-                'R360 IDs': r360['count'],
-                'First Trade Done': first_trade,
-                'T+60 Gross Margin': round(gm, 4),
-                'T+60 Net Margin': round(nm, 4),
-                'Till Date Revenue': round(revenue, 4),
+                'Lead Source': lead_src or match_source_group(lead_src_raw, source_map),
+                'UNIT': str(row[cm_unit]) if cm_unit else '',
+                'DIY/Non DIY': str(row[cm_diy]) if cm_diy else '',
+                'Week': assign_week(act_date, week_config),
+                'SSP Amount': round(ssp['amount'],2), 'SSP IDs': ssp['count'],
+                'TM Amount': round(tm['amount'],2), 'TM IDs': tm['count'],
+                'TGS Amount': round(tgs['amount'],2), 'TGS IDs': tgs['count'],
+                'IMP/IAP Amount': round(iap['amount'],2), 'IMP/IAP IDs': iap['count'],
+                'IP Amount': round(ip_amt,2), 'IP IDs': ip_cnt,
+                'MF SIP Amount': round(mfs['amount'],2), 'MF SIP IDs': mfs['count'],
+                'Bonds Amount': round(bnd['amount'],2), 'Bonds IDs': bnd['count'],
+                'PMS Amount': round(pms['amount'],2), 'PMS IDs': pms['count'],
+                'R360 Amount': round(r360['amount'],2), 'R360 IDs': r360['count'],
+                'First Trade Done': 1 if vol > 0 else 0,
+                'T+60 Gross Margin': round(gm,4),
+                'T+60 Net Margin': round(nm,4),
+                'Till Date Revenue': round(rev_map.get(cc,0)/100_000,4),
                 'Total Products': total_products,
                 'Acs with Min 1 Product': 1 if total_products >= 1 else 0,
-                'MA >25K (T+60 G)': 1 if gm * 100_000 > 25000 else 0,
-                'MA >25K (T+60 N)': 1 if nm * 100_000 > 25000 else 0,
-                'Volume': round(vol, 4),
+                'MA >25K (T+60 G)': 1 if gm*100_000 > 25000 else 0,
+                'MA >25K (T+60 N)': 1 if nm*100_000 > 25000 else 0,
+                'Volume': round(vol,4),
             })
         master_df = pd.DataFrame(master_rows)
         if action == 'master':
-            buf = io.BytesIO()
-            with pd.ExcelWriter(buf, engine='openpyxl') as writer:
-                master_df.to_excel(writer, index=False, sheet_name='Master Raw Data')
-            buf.seek(0)
-            resp = make_response(send_file(buf, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                           as_attachment=True, download_name='Master_Raw_Data.xlsx'))
-            return add_cors(resp)
+            return jsonify({'file': make_excel_b64(master_df, 'Master Raw Data'), 'filename': 'Master_Raw_Data.xlsx'})
         elif action == 'gross':
-            buf = io.BytesIO()
-            wb = Workbook()
-            ws = wb.active
-            ws.title = 'Gross Margin Processed'
-            headers = list(gm_processed.columns)
-            yellow_fill = PatternFill('solid', fgColor='FFFF00')
-            bold_font = Font(bold=True)
-            for ci, h in enumerate(headers, 1):
-                cell = ws.cell(row=1, column=ci, value=h)
-                if any(k in h for k in ['Weighted Gross Margin', 'Capped Gross Margin']):
-                    cell.fill = yellow_fill
-                    cell.font = bold_font
-            for ri, row in enumerate(gm_processed.itertuples(index=False), 2):
-                for ci, val in enumerate(row, 1):
-                    ws.cell(row=ri, column=ci, value=val)
-            wb.save(buf)
-            buf.seek(0)
-            resp = make_response(send_file(buf, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                           as_attachment=True, download_name='Gross_Margin_Processed.xlsx'))
-            return add_cors(resp)
+            return jsonify({'file': make_excel_b64(gm_processed, 'Gross Margin Processed', ['Weighted Gross Margin','Capped Gross Margin']), 'filename': 'Gross_Margin_Processed.xlsx'})
         elif action == 'net':
-            buf = io.BytesIO()
-            wb = Workbook()
-            ws = wb.active
-            ws.title = 'Net Margin Processed'
-            headers = list(nm_processed.columns)
-            yellow_fill = PatternFill('solid', fgColor='FFFF00')
-            bold_font = Font(bold=True)
-            for ci, h in enumerate(headers, 1):
-                cell = ws.cell(row=1, column=ci, value=h)
-                if any(k in h for k in ['Weighted Net Margin', 'Capped Net Margin']):
-                    cell.fill = yellow_fill
-                    cell.font = bold_font
-            for ri, row in enumerate(nm_processed.itertuples(index=False), 2):
-                for ci, val in enumerate(row, 1):
-                    ws.cell(row=ri, column=ci, value=val)
-            wb.save(buf)
-            buf.seek(0)
-            resp = make_response(send_file(buf, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                           as_attachment=True, download_name='Net_Margin_Processed.xlsx'))
-            return add_cors(resp)
+            return jsonify({'file': make_excel_b64(nm_processed, 'Net Margin Processed', ['Weighted Net Margin','Capped Net Margin']), 'filename': 'Net_Margin_Processed.xlsx'})
     except Exception as e:
         import traceback
-        resp = make_response(jsonify({'error': str(e), 'trace': traceback.format_exc()}), 500)
-        return add_cors(resp)
+        return jsonify({'error': str(e), 'trace': traceback.format_exc()}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
